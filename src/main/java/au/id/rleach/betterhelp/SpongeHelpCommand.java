@@ -23,63 +23,132 @@ package au.id.rleach.betterhelp;/*
  * THE SOFTWARE.
  */
 
+import static org.spongepowered.api.command.args.GenericArguments.optional;
+import static org.spongepowered.api.command.args.GenericArguments.string;
+
+import au.id.rleach.betterhelp.topics.Topic;
 import com.google.common.collect.Collections2;
-import com.google.common.collect.ImmutableList;
 import org.spongepowered.api.Sponge;
-import org.spongepowered.api.command.*;
+import org.spongepowered.api.command.CommandException;
+import org.spongepowered.api.command.CommandMapping;
+import org.spongepowered.api.command.CommandResult;
+import org.spongepowered.api.command.CommandSource;
 import org.spongepowered.api.command.spec.CommandSpec;
-import org.spongepowered.api.service.pagination.PaginationBuilder;
+import org.spongepowered.api.plugin.PluginContainer;
+import org.spongepowered.api.service.pagination.PaginationList;
 import org.spongepowered.api.service.pagination.PaginationService;
+import org.spongepowered.api.service.permission.PermissionDescription;
+import org.spongepowered.api.service.permission.PermissionService;
+import org.spongepowered.api.service.permission.Subject;
 import org.spongepowered.api.text.Text;
 import org.spongepowered.api.text.action.TextActions;
 import org.spongepowered.api.text.format.TextColors;
 
+import java.util.Collections;
 import java.util.Comparator;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.TreeSet;
-
-import static org.spongepowered.api.command.args.GenericArguments.optional;
-import static org.spongepowered.api.command.args.GenericArguments.string;
+import java.util.function.Supplier;
 
 public class SpongeHelpCommand {
-
     private static final Comparator<CommandMapping> COMMAND_COMPARATOR = (o1, o2) -> o1.getPrimaryAlias().compareTo(o2.getPrimaryAlias());
+    private final BetterHelp plugin;
 
-    public static CommandSpec create() {
+    SpongeHelpCommand(BetterHelp betterHelp){
+        this.plugin = betterHelp;
+    }
+
+    public CommandSpec create() {
         return CommandSpec
                 .builder()
-                .arguments(optional(string(Text.of("command"))))
+                .arguments(optional(string(Text.of("topic"))))
                 .description(Text.of("View a list of all commands."))
                 .extendedDescription(
                         Text.of("View a list of all commands. Hover over\n" + " a command to view its description. Click\n"
                                 + " a command to insert it into your chat bar."))
                 .executor((src, args) -> {
-                    Optional<String> command = args.getOne("command");
-                    if (command.isPresent()) {
-                        Optional<? extends CommandMapping> mapping = Sponge.getGame().getCommandManager().get(command.get(), src);
-                        if (mapping.isPresent()) {
-                            CommandCallable callable = mapping.get().getCallable();
-                            Optional<? extends Text> desc = callable.getHelp(src);
-                            if (desc.isPresent()) {
-                                src.sendMessage(desc.get());
-                            } else {
-                                src.sendMessage(Text.of("Usage: /", command.get(), callable.getUsage(src)));
-                            }
+                    Supplier<PermissionDescription.Builder> factory = createPermissionDescriptionFactory();
+                    Topic.CommandTopicBuilder tBuilder = new Topic.CommandTopicBuilder();
+                    Topic root = tBuilder.fillRootTopic(Sponge.getGame().getCommandManager(), factory);
+                    PaginationList.Builder builder;
+                    Optional<String> sTopic = args.getOne("topic");
+                    if (sTopic.isPresent()) {
+                        Optional<Topic> optTopic = root.search(sTopic.get());
+                        if (optTopic.isPresent()) {
+                             builder = createPagination(optTopic.get(), src);
+                            builder.sendTo(src);
                             return CommandResult.success();
                         }
-                        throw new CommandException(Text.of("No such command: ", command.get()));
+                        throw new CommandException(Text.of("No such topic/command: ", sTopic.get()));
                     }
-
-                    PaginationBuilder builder = Sponge.getGame().getServiceManager().provide(PaginationService.class).get().builder();
-                    builder.title(Text.builder("Available commands:").color(TextColors.DARK_GREEN).build());
-
-                    TreeSet<CommandMapping> commands = new TreeSet<>(COMMAND_COMPARATOR);
-                    commands.addAll(Collections2.filter(Sponge.getGame().getCommandManager().getAll().values(), input -> input.getCallable()
-                            .testPermission(src)));
-                    builder.contents(ImmutableList.copyOf(Collections2.transform(commands, input -> getDescription(src, input))));
+                    builder = createPagination(root, src);
                     builder.sendTo(src);
                     return CommandResult.success();
                 }).build();
+    }
+
+    private PaginationList.Builder createPagination(Topic topic, CommandSource src) {
+        PaginationList.Builder builder = Sponge.getGame().getServiceManager().provide(PaginationService.class).get().builder();
+        createPermissionDescriptionFactory();
+        builder.title(topic.getTitle()).contents(topic.toTexts(false));
+        return builder;
+    }
+
+    Supplier<PermissionDescription.Builder> createPermissionDescriptionFactory() {
+        Optional<PermissionService> permissionService = Sponge.getServiceManager().provide(PermissionService.class);
+        PermissionDescription.Builder mockBuilder = new PermissionDescription.Builder(){
+
+            @Override public PermissionDescription.Builder id(String permissionId) {
+                return this;
+            }
+
+            @Override public PermissionDescription.Builder description(Text description) {
+                return this;
+            }
+
+            @Override public PermissionDescription.Builder assign(String role, boolean value) {
+                return this;
+            }
+
+            @Override public PermissionDescription register() throws IllegalStateException {
+                return new PermissionDescription(){
+                    @Override public String getId() {
+                        return "";
+                    }
+
+                    @Override public Text getDescription() {
+                        return Text.EMPTY;
+                    }
+
+                    @Override public Map<Subject, Boolean> getAssignedSubjects(String type) {
+                        return Collections.EMPTY_MAP;
+                    }
+
+                    @Override public PluginContainer getOwner() {
+                        return Sponge.getPluginManager().fromInstance(plugin).get();
+                    }
+                };
+            }
+        };
+        Supplier<PermissionDescription.Builder> factory = () -> {
+          if (permissionService.isPresent()) {
+              Optional<PermissionDescription.Builder> pdBuilder = permissionService.get().newDescriptionBuilder(plugin);
+              if (pdBuilder.isPresent()) {
+                  return pdBuilder.get();
+              }
+          }
+            return mockBuilder;
+        };
+        return factory;
+    }
+
+    private Set<CommandMapping> getCommandMappings(CommandSource src) {
+        Set<CommandMapping> commands = new TreeSet<>(COMMAND_COMPARATOR);
+        commands.addAll(Collections2.filter(Sponge.getGame().getCommandManager().getAll().values(), input -> input.getCallable()
+                .testPermission(src)));
+        return commands;
     }
 
     private static Text getDescription(CommandSource source, CommandMapping mapping) {
